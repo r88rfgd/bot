@@ -1,0 +1,17 @@
+{
+  "name": "mybot",
+  "version": "1.0.0",
+  "description": "A simple bot application",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "mineflayer": "*",
+    "express": "*",
+    "mineflayer-pathfinder": "*"
+  }
+}
