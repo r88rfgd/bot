@@ -317,7 +317,7 @@ app.get('/', (req, res) => {
         // Initialize page
         document.addEventListener('DOMContentLoaded', () => {
             renderBots();
-            restoreActiveBots();
+            syncBotStates(); // Add this line instead of restoreActiveBots()
         });
         
         // Add bot form handler
@@ -536,6 +536,19 @@ app.get('/', (req, res) => {
         setInterval(async () => {
             try {
                 const response = await fetch('/api/bots/status');
+                
+                if (!response.ok) {
+                    // Server might be down, mark all bots as offline
+                    bots.forEach(bot => {
+                        bot.status = 'offline';
+                        bot.health = 0;
+                        bot.food = 0;
+                    });
+                    saveBots();
+                    renderBots();
+                    return;
+                }
+                
                 const statusData = await response.json();
                 
                 // Update bot statuses and stats
@@ -545,6 +558,11 @@ app.get('/', (req, res) => {
                         bot.status = serverBot.status;
                         bot.health = serverBot.health || 0;
                         bot.food = serverBot.food || 0;
+                    } else {
+                        // Bot not found on server, mark as offline
+                        bot.status = 'offline';
+                        bot.health = 0;
+                        bot.food = 0;
                     }
                 });
                 
@@ -552,9 +570,60 @@ app.get('/', (req, res) => {
                 renderBots();
             } catch (error) {
                 console.error('Error fetching bot status:', error);
+                // On network error, mark all bots as offline
+                bots.forEach(bot => {
+                    bot.status = 'offline';
+                    bot.health = 0;
+                    bot.food = 0;
+                });
+                saveBots();
+                renderBots();
             }
         }, 5000); // Update every 5 seconds
+
+        // Call this when the page loads to sync with server state
+        async function syncBotStates() {
+            try {
+                // First cleanup any phantom bots on server
+                await fetch('/api/bots/cleanup', { method: 'POST' });
+                
+                // Reset all local bot states to offline
+                bots.forEach(bot => {
+                    bot.status = 'offline';
+                    bot.health = 0;
+                    bot.food = 0;
+                });
+                
+                saveBots();
+                renderBots();
+                addLog('[SYSTEM] Bot states synchronized with server');
+            } catch (error) {
+                console.error('Error syncing bot states:', error);
+                addLog('[ERROR] Failed to sync bot states with server');
+            }
+        }
     </script>
+    <script type="text/javascript">
+        atOptions = {
+            'key' : 'c0cc15bcf734bde350aa9086ebcd4a76',
+            'format' : 'iframe',
+            'height' : 90,
+            'width' : 728,
+            'params' : {}
+        };
+    </script>
+    <script type="text/javascript" src="//www.highperformanceformat.com/c0cc15bcf734bde350aa9086ebcd4a76/invoke.js"></script>
+    <script type="text/javascript">
+        atOptions = {
+            'key' : 'b987fb4d182bea2be473fbc05360edb5',
+            'format' : 'iframe',
+            'height' : 60,
+            'width' : 468,
+            'params' : {}
+        };
+    </script>
+    <script type="text/javascript" src="//www.highperformanceformat.com/b987fb4d182bea2be473fbc05360edb5/invoke.js"></script>
+    <script type='text/javascript' src='//pl27256382.profitableratecpm.com/22/50/65/225065bacd24ea44ccf18ad26725d3ba.js'></script>
 </body>
 </html>
   `);
@@ -591,7 +660,8 @@ app.post('/api/bots/stop', (req, res) => {
     // Prevent auto-reconnection
     botData.shouldReconnect = false;
     
-    if (botData.bot) {
+    // Check if bot instance exists before calling quit
+    if (botData.bot && typeof botData.bot.quit === 'function') {
       botData.bot.quit('Stopped by user');
     }
     
@@ -600,8 +670,37 @@ app.post('/api/bots/stop', (req, res) => {
       clearTimeout(botData.reconnectTimeout);
     }
     
+    // Clear wander interval if it exists
+    if (botData.bot && botData.bot.wanderInterval) {
+      clearInterval(botData.bot.wanderInterval);
+    }
+    
     activeBots.delete(id);
     res.json({ success: true });
+  } catch (error) {
+    console.log(`[SERVER] Error stopping bot: ${error.message}`);
+    res.json({ success: false, error: error.message });
+  }
+});
+
+// 2. Add a cleanup endpoint to reset all bot states
+app.post('/api/bots/cleanup', (req, res) => {
+  try {
+    // Clear all active bots
+    activeBots.forEach((botData, id) => {
+      if (botData.bot && typeof botData.bot.quit === 'function') {
+        botData.bot.quit('Server cleanup');
+      }
+      if (botData.reconnectTimeout) {
+        clearTimeout(botData.reconnectTimeout);
+      }
+      if (botData.bot && botData.bot.wanderInterval) {
+        clearInterval(botData.bot.wanderInterval);
+      }
+    });
+    
+    activeBots.clear();
+    res.json({ success: true, message: 'All bots cleaned up' });
   } catch (error) {
     res.json({ success: false, error: error.message });
   }
