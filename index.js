@@ -660,6 +660,14 @@ app.post('/api/bots/stop', (req, res) => {
     // Prevent auto-reconnection
     botData.shouldReconnect = false;
     
+    // Clean up follow state
+    if (botData.followInterval) {
+      clearInterval(botData.followInterval);
+      botData.followInterval = null;
+    }
+    botData.isFollowing = false;
+    botData.followTarget = null;
+    
     // Check if bot instance exists before calling quit
     if (botData.bot && typeof botData.bot.quit === 'function') {
       botData.bot.quit('Stopped by user');
@@ -732,7 +740,11 @@ function createBot(id, host, port, username) {
     port: port,
     username: username,
     shouldReconnect: true,
-    currentCoordinates: null // Store current target coordinates
+    currentCoordinates: null,
+    // ADD THESE NEW PROPERTIES:
+    followTarget: null,        // Player to follow
+    followInterval: null,      // Interval for following
+    isFollowing: false        // Follow state
   };
   
   function connectBot() {
@@ -754,8 +766,22 @@ function createBot(id, host, port, username) {
         console.log(`[BOT-${id}] Joined the server successfully.`);
         botData.status = 'online';
         
+        // If we were following someone before disconnect, try to resume
+        if (botData.isFollowing && botData.followTarget) {
+          console.log(`[BOT-${id}] Attempting to resume following ${botData.followTarget}`);
+          setTimeout(() => {
+            const targetPlayer = bot.players[botData.followTarget];
+            if (targetPlayer && targetPlayer.entity) {
+              bot.chat(`I'm back! Resuming following ${botData.followTarget}.`);
+              startFollowing(bot, id, botData.followTarget);
+            } else {
+              console.log(`[BOT-${id}] Could not find ${botData.followTarget} after reconnect, stopping follow`);
+              stopFollowing(bot, id);
+            }
+          }, 3000);
+        }
         // If we had coordinates before disconnect, go back to them
-        if (botData.currentCoordinates) {
+        else if (botData.currentCoordinates) {
           const { x, y, z } = botData.currentCoordinates;
           console.log(`[BOT-${id}] Returning to previous coordinates: ${x}, ${y}, ${z}`);
           setTimeout(() => {
@@ -795,11 +821,135 @@ function createBot(id, host, port, username) {
         bot.on('chat', (username, message) => {
           if (username === bot.username) return;
           
+          const lowerMessage = message.toLowerCase();
+          const botNameLower = bot.username.toLowerCase();
+          
+          // Follow command
+          if (lowerMessage.includes(`${botNameLower} follow`)) {
+            const player = bot.players[username];
+            if (player && player.entity) {
+              // Stop any current activities
+              clearInterval(bot.wanderInterval);
+              if (botData.followInterval) {
+                clearInterval(botData.followInterval);
+              }
+              
+              // Clear stored coordinates since we're now following
+              botData.currentCoordinates = null;
+              
+              botData.followTarget = username;
+              botData.isFollowing = true;
+              
+              console.log(`[BOT-${id}] Now following ${username}`);
+              bot.chat(`I'm now following you, ${username}!`);
+              
+              startFollowing(bot, id, username);
+              return;
+            } else {
+              bot.chat(`Sorry ${username}, I can't see you to follow!`);
+              return;
+            }
+          }
+          
+          // Stop following command
+          if (lowerMessage.includes(`${botNameLower} stop follow`) || lowerMessage.includes(`${botNameLower} unfollow`)) {
+            if (botData.isFollowing && botData.followTarget === username) {
+              stopFollowing(bot, id);
+              bot.chat(`Stopped following you, ${username}!`);
+              return;
+            } else if (botData.isFollowing && botData.followTarget !== username) {
+              bot.chat(`I'm currently following ${botData.followTarget}, not you!`);
+              return;
+            } else {
+              bot.chat(`I'm not following anyone right now!`);
+              return;
+            }
+          }
+          
+          // Debug command to check inventory
+          if (lowerMessage === `${botNameLower} inventory` || lowerMessage === `${botNameLower} inv`) {
+            const items = bot.inventory.items();
+            if (items.length === 0) {
+              bot.chat("My inventory is empty!");
+            } else {
+              const itemList = items.map(item => `${item.name}(${item.count})`).join(', ');
+              bot.chat(`My inventory: ${itemList}`);
+              console.log(`[BOT-${id}] Inventory contents: ${itemList}`);
+            }
+            return;
+          }
+          
+          // Health status command
+          if (lowerMessage === `${botNameLower} health` || lowerMessage === `${botNameLower} status`) {
+            bot.chat(`Health: ${bot.health}/20, Food: ${bot.food}/20, Saturation: ${bot.foodSaturation.toFixed(1)}`);
+            return;
+          }
+          
+          // Sleep command
+          if (lowerMessage.includes(`${botNameLower} sleep`)) {
+            console.log(`[BOT-${id}] Received sleep command from ${username}`);
+            bot.chat(`Looking for a bed to sleep in...`);
+            findAndUseBed(bot, id);
+            return;
+          }
+          
+          // Chest search command: "botname find 10 diamond" or "botname search 5 iron_ingot"
+          const searchPattern = new RegExp(`${botNameLower}\\s+(find|search)\\s+(\\d+)\\s+(.+)`, 'i');
+          const searchMatch = lowerMessage.match(searchPattern);
+
+          if (searchMatch) {
+            const quantity = parseInt(searchMatch[2]);
+            const itemName = searchMatch[3].trim();
+            
+            // Stop following if we're following someone
+            if (botData.isFollowing) {
+              stopFollowing(bot, id);
+              bot.chat(`Stopping follow mode to search for items!`);
+            }
+            
+            console.log(`[BOT-${id}] Received search command: looking for ${quantity}x ${itemName}`);
+            bot.chat(`🔍 Starting search for ${quantity}x ${itemName}...`);
+            
+            // Start the chest search
+            searchChestsForItem(bot, id, username, itemName, quantity);
+            return;
+          }
+
+          // You can also add a simpler version without quantity (defaults to 1)
+          const simpleSearchPattern = new RegExp(`${botNameLower}\\s+(find|search)\\s+(.+)`, 'i');
+          const simpleSearchMatch = lowerMessage.match(simpleSearchPattern);
+
+          if (simpleSearchMatch && !searchMatch) { // Only if the detailed pattern didn't match
+            const itemName = simpleSearchMatch[2].trim();
+            
+            // Skip if it looks like it might be a number (to avoid conflicts)
+            if (!/^\d+/.test(itemName)) {
+              // Stop following if we're following someone
+              if (botData.isFollowing) {
+                stopFollowing(bot, id);
+                bot.chat(`Stopping follow mode to search for items!`);
+              }
+              
+              console.log(`[BOT-${id}] Received simple search command: looking for ${itemName}`);
+              bot.chat(`🔍 Starting search for ${itemName}...`);
+              
+              // Start the chest search with quantity 1
+              searchChestsForItem(bot, id, username, itemName, 1);
+              return;
+            }
+          }
+          
           // Check for coordinate command
-          const coordPattern = new RegExp(`${bot.username.toLowerCase()}\\s+(-?\\d+)\\s+(-?\\d+)\\s+(-?\\d+)`, 'i');
-          const coordMatch = message.toLowerCase().match(coordPattern);
+          const coordPattern = new RegExp(`${botNameLower}\\s+(-?\\d+)\\s+(-?\\d+)\\s+(-?\\d+)`, 'i');
+          const coordMatch = lowerMessage.match(coordPattern);
           
           if (coordMatch) {
+            // Stop following if we get coordinate command
+            if (botData.isFollowing) {
+              stopFollowing(bot, id);
+              bot.chat(`Stopped following to go to coordinates!`);
+            }
+            
             const x = parseInt(coordMatch[1]);
             const y = parseInt(coordMatch[2]);
             const z = parseInt(coordMatch[3]);
@@ -816,7 +966,7 @@ function createBot(id, host, port, username) {
           }
           
           // Original name response
-          if (message.toLowerCase().includes(bot.username.toLowerCase())) {
+          if (lowerMessage.includes(botNameLower)) {
             const responses = [
               "Hi there! You called me?",
               "What's up?", 
@@ -905,12 +1055,21 @@ function wanderAround(bot) {
     
     bot.lookAt(target.offset(0, 1.5, 0));
     bot.setControlState('forward', true);
+    if (Math.random() < 0.345613) bot.setControlState('jump', true); // NEW LINE
+
     
     setTimeout(() => {
       if (bot.entity) {
         bot.setControlState('forward', false);
+
       }
     }, 500 + Math.random() * 500);
+    setTimeout(() => {
+      if (bot.entity) {
+        bot.setControlState('jump', false);
+      }
+    }, 1800);
+
   }, 3000 + Math.random() * 3000);
 
   // Clear interval when bot disconnects
@@ -1059,13 +1218,19 @@ function wanderAroundCoordinates(bot, botId, centerX, centerY, centerZ) {
       // Look towards target and move back
       bot.lookAt(targetPos.offset(0, 1.5, 0));
       bot.setControlState('forward', true);
+      if (Math.random() < 0.345613) bot.setControlState('jump', true); // NEW LINE
+
       
       setTimeout(() => {
         if (bot.entity) {
           bot.setControlState('forward', false);
         }
       }, 200);
-      
+      setTimeout(() => {
+        if (bot.entity) {
+          bot.setControlState('jump', false);
+        }
+      }, 1000);
       return;
     }
     
@@ -1087,12 +1252,18 @@ function wanderAroundCoordinates(bot, botId, centerX, centerY, centerZ) {
       );
       bot.lookAt(centerTarget.offset(0, 1.5, 0));
       bot.setControlState('forward', true);
-      
+      if (Math.random() < 0.345613) bot.setControlState('jump', true); // NEW LINE
+
       setTimeout(() => {
         if (bot.entity) {
           bot.setControlState('forward', false);
         }
       }, 100);
+      setTimeout(() => {
+      if (bot.entity) {
+        bot.setControlState('jump', false);
+      }
+    }, 1000);
     } else {
       // Make a tiny random movement within the block
       if (Math.random() < 0.4) {
@@ -1114,12 +1285,19 @@ function wanderAroundCoordinates(bot, botId, centerX, centerY, centerZ) {
           );
           bot.lookAt(moveTarget.offset(0, 1.5, 0));
           bot.setControlState('forward', true);
+          if (Math.random() < 0.345613) bot.setControlState('jump', true); // NEW LINE
+
           
           setTimeout(() => {
             if (bot.entity) {
               bot.setControlState('forward', false);
             }
           }, 50 + Math.random() * 100);
+          setTimeout(() => {
+            if (bot.entity) {
+              bot.setControlState('jump', false);
+            }
+          }, 1800);
         }
       } else {
         // Just look around randomly while staying in place
@@ -1166,62 +1344,656 @@ function checkAndEat(bot, botId) {
   }
 }
 
+function startFollowing(bot, botId, targetUsername) {
+  const botData = activeBots.get(botId);
+  if (!botData) return;
+  
+  console.log(`[BOT-${botId}] Starting to follow ${targetUsername}`);
+  
+  // Clear any existing follow interval
+  if (botData.followInterval) {
+    clearInterval(botData.followInterval);
+  }
+  
+  // Store current pathfinding promise to handle cancellation
+  let currentPathfinding = null;
+  
+  botData.followInterval = setInterval(async () => {
+    if (!bot.entity || !botData.isFollowing) {
+      return;
+    }
+    
+    const targetPlayer = bot.players[targetUsername];
+    if (!targetPlayer || !targetPlayer.entity) {
+      console.log(`[BOT-${botId}] Lost sight of ${targetUsername}, stopping follow`);
+      bot.chat(`I lost sight of you, ${targetUsername}! Stopping follow.`);
+      stopFollowing(bot, botId);
+      return;
+    }
+    
+    const botPos = bot.entity.position;
+    const targetPos = targetPlayer.entity.position;
+    const distance = botPos.distanceTo(targetPos);
+    
+    // Follow if target is more than 3 blocks away
+    if (distance > 3) {
+      try {
+        console.log(`[BOT-${botId}] Following ${targetUsername} - distance: ${distance.toFixed(2)}`);
+        
+        // Cancel any existing pathfinding to prevent GoalChanged errors
+        if (currentPathfinding) {
+          try {
+            bot.pathfinder.setGoal(null);
+          } catch (e) {
+            // Ignore goal cancellation errors
+          }
+        }
+        
+        const defaultMove = new Movements(bot);
+        defaultMove.canSwim = true;
+        defaultMove.allowSprinting = true;
+        
+        // Add scaffolding blocks for building
+        defaultMove.scaffoldingBlocks = [
+          bot.registry.itemsByName.dirt?.id,
+          bot.registry.itemsByName.cobblestone?.id,
+          bot.registry.itemsByName.stone?.id,
+          bot.registry.itemsByName.scaffolding?.id,
+          bot.registry.itemsByName.oak_planks?.id
+        ].filter(id => id !== undefined);
+        
+        // Add climbables
+        if (bot.registry.blocksByName.ladder) {
+          defaultMove.climbables.add(bot.registry.blocksByName.ladder.id);
+        }
+        if (bot.registry.blocksByName.vine) {
+          defaultMove.climbables.add(bot.registry.blocksByName.vine.id);
+        }
+        if (bot.registry.blocksByName.scaffolding) {
+          defaultMove.climbables.add(bot.registry.blocksByName.scaffolding.id);
+        }
+        
+        defaultMove.liquidCost = 1;
+        bot.pathfinder.setMovements(defaultMove);
+        
+        // Follow to within 2 blocks of the target
+        const goal = new GoalNear(targetPos.x, targetPos.y, targetPos.z, 2);
+        
+        // Start new pathfinding
+        currentPathfinding = bot.pathfinder.goto(goal).catch(error => {
+          // Handle pathfinding errors gracefully
+          if (error.message.includes('GoalChanged')) {
+            console.log(`[BOT-${botId}] Goal changed while following - this is normal`);
+          } else if (error.message.includes('NoPath')) {
+            console.log(`[BOT-${botId}] No path found to ${targetUsername}, trying to get closer`);
+          } else {
+            console.log(`[BOT-${botId}] Pathfinding error: ${error.message}`);
+          }
+        });
+        
+      } catch (error) {
+        console.log(`[BOT-${botId}] Error while following: ${error.message}`);
+      }
+    }
+    // If close enough (within 3 blocks), just look at the target
+    else if (distance <= 3) {
+      try {
+        bot.lookAt(targetPos.offset(0, 1.6, 0));
+      } catch (lookError) {
+        console.log(`[BOT-${botId}] Error looking at target: ${lookError.message}`);
+      }
+    }
+    
+  }, 2000); // Increased to 2 seconds to reduce goal conflicts
+  
+  // Clean up on disconnect
+  bot.on('end', () => {
+    if (botData.followInterval) {
+      clearInterval(botData.followInterval);
+      botData.followInterval = null;
+    }
+    currentPathfinding = null;
+  });
+}
+
+function stopFollowing(bot, botId) {
+  const botData = activeBots.get(botId);
+  if (!botData) return;
+  
+  console.log(`[BOT-${botId}] Stopping follow mode`);
+  
+  botData.isFollowing = false;
+  botData.followTarget = null;
+  
+  if (botData.followInterval) {
+    clearInterval(botData.followInterval);
+    botData.followInterval = null;
+  }
+  
+  // Stop any current pathfinding
+  bot.pathfinder.setGoal(null);
+  
+  // Resume normal wandering
+  setTimeout(() => {
+    if (bot.entity && !botData.currentCoordinates) {
+      wanderAround(bot);
+    }
+  }, 1000);
+}
+
+async function searchChestsForItem(bot, botId, username, itemName, quantity) {
+  if (!bot || !bot.entity) {
+    console.log(`[BOT-${botId}] Bot not available for chest search`);
+    return;
+  }
+
+  const requestedQuantity = parseInt(quantity) || 1;
+  console.log(`[BOT-${botId}] Starting chest search for ${requestedQuantity}x ${itemName} requested by ${username}`);
+  
+  bot.chat(`🔍 Searching for ${requestedQuantity}x ${itemName} in nearby chests...`);
+  
+  // Stop current activities
+  if (bot.wanderInterval) {
+    clearInterval(bot.wanderInterval);
+  }
+  bot.pathfinder.setGoal(null);
+  
+  const botPos = bot.entity.position;
+  const searchRadius = 50;
+  const chestBlockTypes = [
+    bot.registry.blocksByName.chest?.id,
+    bot.registry.blocksByName.trapped_chest?.id,
+    bot.registry.blocksByName.ender_chest?.id,
+    bot.registry.blocksByName.barrel?.id,
+    bot.registry.blocksByName.shulker_box?.id
+  ].filter(id => id !== undefined);
+
+  console.log(`[BOT-${botId}] Using findBlocks method to locate chests...`);
+
+  // Use bot.findBlocks instead of manual scanning
+  const chestPositions = bot.findBlocks({
+    matching: (block) => {
+      return chestBlockTypes.includes(block.type) && 
+             (!block.getProperties || 
+              !block.getProperties().type || 
+              block.getProperties().type === 'single' || 
+              block.getProperties().type === 'right');
+    },
+    useExtraInfo: true,
+    maxDistance: searchRadius,
+    count: 100
+  });
+
+  const chestsFound = chestPositions.map(pos => {
+    const block = bot.blockAt(pos);
+    const distance = botPos.distanceTo(pos);
+    return {
+      block: block,
+      position: { x: pos.x, y: pos.y, z: pos.z },
+      distance: distance,
+      type: block.name
+    };
+  });
+
+  console.log(`[BOT-${botId}] Found ${chestsFound.length} chests/containers in ${searchRadius} block radius`);
+  
+  if (chestsFound.length === 0) {
+    bot.chat(`❌ No chests found within ${searchRadius} blocks!`);
+    resumeNormalActivity(bot, botId);
+    return;
+  }
+
+  bot.chat(`📦 Found ${chestsFound.length} containers, checking contents...`);
+
+  // Sort chests by distance (closest first)
+  chestsFound.sort((a, b) => a.distance - b.distance);
+
+  let totalItemsFound = 0;
+  let totalItemsCollected = 0;
+  const chestsWithItems = [];
+  let successfulChestSearches = 0;
+
+  // Search each chest
+  for (const chestInfo of chestsFound) {
+    if (totalItemsCollected >= requestedQuantity) {
+      break; // We have enough items
+    }
+
+    try {
+      console.log(`[BOT-${botId}] Moving to chest at ${chestInfo.position.x}, ${chestInfo.position.y}, ${chestInfo.position.z} (${chestInfo.distance.toFixed(1)} blocks away)`);
+      
+      // Move to chest
+      const defaultMove = new Movements(bot);
+      defaultMove.canSwim = true;
+      defaultMove.allowSprinting = true;
+      bot.pathfinder.setMovements(defaultMove);
+      
+      const goal = new GoalNear(chestInfo.position.x, chestInfo.position.y, chestInfo.position.z, 1);
+      await bot.pathfinder.goto(goal);
+      
+      console.log(`[BOT-${botId}] Reached chest, attempting to open...`);
+      
+      // Open the chest
+      const chest = await bot.openContainer(chestInfo.block);
+      await new Promise(resolve => setTimeout(resolve, 500)); // Wait for chest to load
+      successfulChestSearches++;
+      
+      console.log(`[BOT-${botId}] Opened ${chestInfo.type}, scanning contents...`);
+      
+      // Search for the item in this chest
+      const items = chest.containerItems(); // Use containerItems() instead of items()
+      let itemsInThisChest = 0;
+
+      for (const item of items) {
+        // More flexible item matching
+        const itemNameLower = item.name.toLowerCase().replace(/_/g, ' ');
+        const searchNameLower = itemName.toLowerCase().replace(/_/g, ' ');
+        
+        if (itemNameLower.includes(searchNameLower) || 
+            searchNameLower.includes(itemNameLower) ||
+            item.name.toLowerCase() === itemName.toLowerCase() ||
+            item.displayName?.toLowerCase().includes(searchNameLower)) {
+          itemsInThisChest += item.count;
+          totalItemsFound += item.count;
+          console.log(`[BOT-${botId}] Matched item: ${item.name} (${item.count}) - searched for: ${itemName}`);
+        }
+      }
+      
+      if (itemsInThisChest > 0) {
+        console.log(`[BOT-${botId}] Found ${itemsInThisChest}x ${itemName} in this chest`);
+        chestsWithItems.push({
+          position: chestInfo.position,
+          quantity: itemsInThisChest,
+          type: chestInfo.type
+        });
+        
+        // Take items from this chest
+        const itemsToTake = Math.min(itemsInThisChest, requestedQuantity - totalItemsCollected);
+        let itemsTakenFromChest = 0;
+        
+        for (const item of items) {
+          if (itemsTakenFromChest >= itemsToTake) break;
+          
+          // Same flexible matching as above
+          const itemNameLower = item.name.toLowerCase().replace(/_/g, ' ');
+          const searchNameLower = itemName.toLowerCase().replace(/_/g, ' ');
+          
+          if (itemNameLower.includes(searchNameLower) || 
+              searchNameLower.includes(itemNameLower) ||
+              item.name.toLowerCase() === itemName.toLowerCase() ||
+              item.displayName?.toLowerCase().includes(searchNameLower)) {
+            
+            const quantityToTake = Math.min(item.count, itemsToTake - itemsTakenFromChest);
+            
+            try {
+              await chest.withdraw(item.type, null, quantityToTake);
+              itemsTakenFromChest += quantityToTake;
+              totalItemsCollected += quantityToTake;
+              console.log(`[BOT-${botId}] Successfully took ${quantityToTake}x ${item.name} from chest`);
+            } catch (withdrawError) {
+              console.log(`[BOT-${botId}] Error taking ${item.name}: ${withdrawError.message}`);
+            }
+          }
+        }
+      }
+      
+      // Close the chest
+      chest.close();
+      
+      // Small delay between chests
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+    } catch (error) {
+      console.log(`[BOT-${botId}] Error with chest at ${chestInfo.position.x},${chestInfo.position.y},${chestInfo.position.z}: ${error.message}`);
+      // Continue to next chest
+    }
+  }
+
+  // Report results
+  console.log(`[BOT-${botId}] Chest search completed. Checked ${successfulChestSearches}/${chestsFound.length} containers`);
+  
+  if (totalItemsCollected === 0) {
+    bot.chat(`❌ Sorry ${username}, I couldn't find any "${itemName}" in ${successfulChestSearches} containers I checked!`);
+  } else if (totalItemsCollected < requestedQuantity) {
+    bot.chat(`⚠️ ${username}, I found ${totalItemsCollected}/${requestedQuantity} "${itemName}" from ${chestsWithItems.length} containers. That's all I could find!`);
+    
+    // Try to give items to player
+    await giveItemsToPlayer(bot, botId, username, itemName);
+  } else {
+    bot.chat(`✅ ${username}, I collected ${totalItemsCollected}x "${itemName}" from ${chestsWithItems.length} containers!`);
+    
+    // Try to give items to player
+    await giveItemsToPlayer(bot, botId, username, itemName);
+  }
+
+  // Resume normal activity
+  setTimeout(() => {
+    resumeNormalActivity(bot, botId);
+  }, 2000);
+}
+
+async function giveItemsToPlayer(bot, botId, username, itemName) {
+  try {
+    const targetPlayer = bot.players[username];
+    if (!targetPlayer || !targetPlayer.entity) {
+      bot.chat(`${username}, I have your items but I can't see you! Come closer so I can give them to you.`);
+      return;
+    }
+
+    const botPos = bot.entity.position;
+    const playerPos = targetPlayer.entity.position;
+    const distance = botPos.distanceTo(playerPos);
+
+    // Move closer to player if too far
+    if (distance > 4) {
+      console.log(`[BOT-${botId}] Moving closer to ${username} to give items (distance: ${distance.toFixed(1)})`);
+      bot.chat(`${username}, coming to you to give the items...`);
+      
+      const defaultMove = new Movements(bot);
+      defaultMove.canSwim = true;
+      defaultMove.allowSprinting = true;
+      bot.pathfinder.setMovements(defaultMove);
+      
+      const goal = new GoalNear(playerPos.x, playerPos.y, playerPos.z, 2);
+      await bot.pathfinder.goto(goal);
+    }
+
+    // Find the items in bot's inventory
+    const inventoryItems = bot.inventory.items();
+    const itemsToGive = inventoryItems.filter(item => {
+      const itemNameNormalized = item.name.toLowerCase().replace(/_/g, ' ');
+      const searchNameNormalized = itemName.toLowerCase().replace(/_/g, ' ');
+      return itemNameNormalized.includes(searchNameNormalized) || 
+             searchNameNormalized.includes(itemNameNormalized) ||
+             item.name.toLowerCase().includes(itemName.toLowerCase()) || 
+             itemName.toLowerCase().includes(item.name.toLowerCase());
+    });
+
+    if (itemsToGive.length === 0) {
+      bot.chat(`${username}, it seems I don't have any "${itemName}" in my inventory anymore!`);
+      return;
+    }
+
+    bot.chat(`${username}, I'm dropping your items now!`);
+    
+    // Drop the items near the player
+    for (const item of itemsToGive) {
+      try {
+        await bot.toss(item.type, null, item.count);
+        console.log(`[BOT-${botId}] Dropped ${item.count}x ${item.name} for ${username}`);
+      } catch (tossError) {
+        console.log(`[BOT-${botId}] Error dropping ${item.name}: ${tossError.message}`);
+      }
+    }
+    
+    bot.chat(`📦 ${username}, I've dropped all your "${itemName}" items! Please pick them up.`);
+    
+  } catch (error) {
+    console.log(`[BOT-${botId}] Error giving items to player: ${error.message}`);
+    bot.chat(`${username}, I have your items but there was an error giving them to you. They're in my inventory.`);
+  }
+}
+
+function resumeNormalActivity(bot, botId) {
+  const botData = activeBots.get(botId);
+  if (!botData) return;
+  
+  // Resume following if we were following someone
+  if (botData.isFollowing && botData.followTarget) {
+    console.log(`[BOT-${botId}] Resuming following ${botData.followTarget}`);
+    const targetPlayer = bot.players[botData.followTarget];
+    if (targetPlayer && targetPlayer.entity) {
+      startFollowing(bot, botId, botData.followTarget);
+    } else {
+      botData.isFollowing = false;
+      botData.followTarget = null;
+      wanderAround(bot);
+    }
+  }
+  // Resume coordinate mode if we had coordinates
+  else if (botData.currentCoordinates) {
+    const { x, y, z } = botData.currentCoordinates;
+    console.log(`[BOT-${botId}] Resuming coordinate wandering at ${x}, ${y}, ${z}`);
+    setTimeout(() => {
+      goToCoordinates(bot, botId, x, y, z);
+    }, 1000);
+  }
+  // Otherwise just wander normally
+  else {
+    console.log(`[BOT-${botId}] Resuming normal wandering`);
+    wanderAround(bot);
+  }
+}
+
+async function findAndUseBed(bot, botId) {
+  if (!bot || !bot.entity) {
+    console.log(`[BOT-${botId}] Bot not available for sleep`);
+    return;
+  }
+
+  console.log(`[BOT-${botId}] Searching for beds...`);
+  
+  const botPos = bot.entity.position;
+  const searchRadius = 50;
+  
+  // All bed types
+  const bedBlockTypes = [
+    'white_bed', 'orange_bed', 'magenta_bed', 'light_blue_bed', 'yellow_bed',
+    'lime_bed', 'pink_bed', 'gray_bed', 'light_gray_bed', 'cyan_bed',
+    'purple_bed', 'blue_bed', 'brown_bed', 'green_bed', 'red_bed', 'black_bed'
+  ].map(bedName => bot.registry.blocksByName[bedName]?.id).filter(id => id !== undefined);
+
+  if (bedBlockTypes.length === 0) {
+    bot.chat(`❌ No bed blocks found in registry!`);
+    return;
+  }
+
+  // Find beds using bot.findBlocks
+  const bedPositions = bot.findBlocks({
+    matching: (block) => {
+      return bedBlockTypes.includes(block.type) && 
+             (!block.getProperties || 
+              !block.getProperties().part || 
+              block.getProperties().part === 'head'); // Only target bed head
+    },
+    useExtraInfo: true,
+    maxDistance: searchRadius,
+    count: 20
+  });
+
+  const bedsFound = bedPositions.map(pos => {
+    const block = bot.blockAt(pos);
+    const distance = botPos.distanceTo(pos);
+    return {
+      block: block,
+      position: { x: pos.x, y: pos.y, z: pos.z },
+      distance: distance,
+      type: block.name
+    };
+  });
+
+  console.log(`[BOT-${botId}] Found ${bedsFound.length} beds in ${searchRadius} block radius`);
+  
+  if (bedsFound.length === 0) {
+    bot.chat(`❌ No beds found within ${searchRadius} blocks!`);
+    return;
+  }
+
+  // Sort beds by distance (closest first)
+  bedsFound.sort((a, b) => a.distance - b.distance);
+  const nearestBed = bedsFound[0];
+
+  bot.chat(`🛏️ Found bed ${nearestBed.distance.toFixed(1)} blocks away, going to sleep...`);
+
+  try {
+    console.log(`[BOT-${botId}] Moving to bed at ${nearestBed.position.x}, ${nearestBed.position.y}, ${nearestBed.position.z}`);
+    
+    // Stop current activities
+    if (bot.wanderInterval) {
+      clearInterval(bot.wanderInterval);
+    }
+    bot.pathfinder.setGoal(null);
+    
+    // Move to bed
+    const defaultMove = new Movements(bot);
+    defaultMove.canSwim = true;
+    defaultMove.allowSprinting = true;
+    bot.pathfinder.setMovements(defaultMove);
+    
+    const goal = new GoalNear(nearestBed.position.x, nearestBed.position.y, nearestBed.position.z, 1);
+    await bot.pathfinder.goto(goal);
+    
+    console.log(`[BOT-${botId}] Reached bed, attempting to sleep...`);
+    
+    // Look at the bed
+    const bedPos = nearestBed.block.position;
+    await bot.lookAt(bedPos.offset(0.5, 0.5, 0.5));
+    
+    // Wait a moment
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    // Try to sleep (right-click the bed)
+    try {
+      await bot.sleep(nearestBed.block);
+      console.log(`[BOT-${botId}] Successfully started sleeping!`);
+      bot.chat(`😴 Going to sleep... Good night!`);
+      
+      // Wait for sleep to complete or be interrupted
+      bot.once('wake', () => {
+        console.log(`[BOT-${botId}] Woke up from sleep`);
+        bot.chat(`🌅 Good morning! I'm awake now.`);
+        
+        // Resume normal activity after a short delay
+        setTimeout(() => {
+          resumeNormalActivity(bot, botId);
+        }, 2000);
+      });
+      
+    } catch (sleepError) {
+      console.log(`[BOT-${botId}] Error trying to sleep: ${sleepError.message}`);
+      
+      if (sleepError.message.includes('Cannot sleep')) {
+        bot.chat(`❌ Can't sleep right now! (Maybe it's not night time or bed is occupied)`);
+      } else if (sleepError.message.includes('Too far')) {
+        bot.chat(`❌ I'm too far from the bed to sleep!`);
+      } else {
+        bot.chat(`❌ Failed to sleep: ${sleepError.message}`);
+      }
+      
+      // Resume normal activity
+      setTimeout(() => {
+        resumeNormalActivity(bot, botId);
+      }, 2000);
+    }
+    
+  } catch (pathError) {
+    console.log(`[BOT-${botId}] Error reaching bed: ${pathError.message}`);
+    bot.chat(`❌ Couldn't reach the bed!`);
+    
+    // Resume normal activity
+    setTimeout(() => {
+      resumeNormalActivity(bot, botId);
+    }, 2000);
+  }
+}
+
 async function eatFood(bot, botId) {
   if (!bot || !bot.inventory || bot.usingHeldItem) {
     return;
   }
 
+  // Expanded food list including more items that might be in inventory
   const foodItems = [
-    'golden_apple', 'golden_carrot', 'cooked_beef', 'cooked_porkchop', 
-    'cooked_chicken', 'cooked_mutton', 'cooked_salmon', 'cooked_cod',
+    // Best foods (highest priority)
+    'golden_apple', 'enchanted_golden_apple', 'golden_carrot',
+    // Cooked meats
+    'cooked_beef', 'cooked_porkchop', 'cooked_chicken', 'cooked_mutton', 
+    'cooked_salmon', 'cooked_cod', 'cooked_rabbit',
+    // Good foods
     'baked_potato', 'bread', 'cake', 'pumpkin_pie', 'rabbit_stew', 
-    'mushroom_stew', 'beetroot_soup', 'suspicious_stew', 'cookie',
-    'apple', 'carrot', 'potato', 'beetroot', 'melon_slice', 'sweet_berries',
-    'beef', 'porkchop', 'chicken', 'mutton', 'rabbit'
+    'mushroom_stew', 'beetroot_soup', 'suspicious_stew',
+    // Decent foods
+    'cookie', 'apple', 'carrot', 'potato', 'beetroot', 'melon_slice', 
+    'sweet_berries', 'glow_berries', 'honey_bottle',
+    // Raw foods (lower priority but still edible)
+    'beef', 'porkchop', 'chicken', 'mutton', 'rabbit', 'salmon', 'cod',
+    // Other foods
+    'tropical_fish', 'pufferfish', 'spider_eye', 'rotten_flesh',
+    'poisonous_potato', 'chorus_fruit', 'dried_kelp'
   ];
 
   let foodItem = null;
   try {
+    // Debug: List all items in inventory
+    const allItems = bot.inventory.items();
+    console.log(`[BOT-${botId}] Inventory items: ${allItems.map(item => `${item.name}(${item.count})`).join(', ')}`);
+    
     for (const foodName of foodItems) {
-      foodItem = bot.inventory.items().find(item => item.name === foodName);
+      foodItem = allItems.find(item => item.name === foodName);
       if (foodItem) {
-        console.log(`[BOT-${botId}] Found ${foodName} in inventory`);
+        console.log(`[BOT-${botId}] Found ${foodName} (${foodItem.count}) in inventory - attempting to eat`);
         break;
       }
     }
+    
+    // If no specific food found, try to find any item that can be consumed
+    if (!foodItem) {
+      foodItem = allItems.find(item => {
+        try {
+          // Check if item has food properties
+          return item.food && item.food > 0;
+        } catch (e) {
+          return false;
+        }
+      });
+      
+      if (foodItem) {
+        console.log(`[BOT-${botId}] Found consumable item: ${foodItem.name}`);
+      }
+    }
+    
   } catch (err) {
     console.log(`[BOT-${botId}] Error accessing inventory: ${err.message}`);
     return;
   }
 
   if (!foodItem) {
-    console.log(`[BOT-${botId}] No food found in inventory`);
+    console.log(`[BOT-${botId}] No food found in inventory. Available items: ${bot.inventory.items().map(i => i.name).join(', ')}`);
     return;
   }
 
   try {
-    console.log(`[BOT-${botId}] Starting to consume ${foodItem.name}...`);
+    console.log(`[BOT-${botId}] Attempting to equip and consume ${foodItem.name}...`);
+    
+    // First try to equip the food item
+    await bot.equip(foodItem, 'hand');
+    console.log(`[BOT-${botId}] Equipped ${foodItem.name}, now consuming...`);
+    
+    // Try the consume method first
     await bot.consume();
-    console.log(`[BOT-${botId}] Successfully consumed food! Health: ${bot.health}, Food: ${bot.food}`);
+    console.log(`[BOT-${botId}] Successfully consumed ${foodItem.name}! Health: ${bot.health}, Food: ${bot.food}`);
+    
   } catch (err) {
-    console.log(`[BOT-${botId}] Error consuming food: ${err.message}`);
+    console.log(`[BOT-${botId}] Error with consume method: ${err.message}`);
     
     try {
-      console.log(`[BOT-${botId}] Trying fallback method: equip + activate`);
-      await bot.equip(foodItem, 'hand');
+      console.log(`[BOT-${botId}] Trying fallback method: manual activation`);
+      
+      // Fallback: manually activate item
       bot.activateItem();
       
+      // Hold for eating duration
       setTimeout(() => {
         try {
           bot.deactivateItem();
-          console.log(`[BOT-${botId}] Stopped eating (fallback method)`);
+          console.log(`[BOT-${botId}] Finished eating ${foodItem.name} (fallback method)`);
         } catch (deactivateErr) {
           console.log(`[BOT-${botId}] Error deactivating item: ${deactivateErr.message}`);
         }
-      }, 1600);
+      }, 1600); // Standard eating time
       
     } catch (fallbackErr) {
-      console.log(`[BOT-${botId}] Fallback method also failed: ${fallbackErr.message}`);
+      console.log(`[BOT-${botId}] All eating methods failed: ${fallbackErr.message}`);
     }
   }
 }
