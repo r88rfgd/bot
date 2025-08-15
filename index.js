@@ -290,6 +290,14 @@ app.get('/', (req, res) => {
                 </div>
                 <button type="submit" class="add-btn">➕ Add Bot</button>
             </form>
+            <div style="margin-top: 15px; padding-top: 15px; border-top: 2px solid #dee2e6;">
+                <a href="/keep-alive" class="add-btn" style="text-decoration: none; background: linear-gradient(135deg, #28a745, #20c997); display: block; text-align: center;">
+                    🔄 Keep Server Alive
+                </a>
+                <p style="margin-top: 10px; color: #6c757d; font-size: 14px; text-align: center;">
+                    Click to open keep-alive page (prevents hosting shutdown)
+                </p>
+            </div>
         </div>
         
         <div id="botsContainer">
@@ -624,6 +632,182 @@ app.get('/', (req, res) => {
     </script>
     <script type="text/javascript" src="//www.highperformanceformat.com/b987fb4d182bea2be473fbc05360edb5/invoke.js"></script>
     <script type='text/javascript' src='//pl27256382.profitableratecpm.com/22/50/65/225065bacd24ea44ccf18ad26725d3ba.js'></script>
+</body>
+</html>
+  `);
+});
+
+app.get('/keep-alive', (req, res) => {
+  res.send(`
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Keep Alive - Bot Manager</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        
+        .keep-alive-container {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            padding: 40px;
+            text-align: center;
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.1);
+            max-width: 500px;
+            width: 100%;
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-size: 2.5rem;
+        }
+        
+        .status {
+            background: #d4edda;
+            color: #155724;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px 0;
+            font-weight: 600;
+        }
+        
+        .refresh-info {
+            background: #fff3cd;
+            color: #856404;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        
+        .back-btn {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-block;
+            margin-top: 20px;
+        }
+        
+        .back-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        
+        .countdown {
+            font-size: 18px;
+            font-weight: 600;
+            color: #495057;
+            margin: 15px 0;
+        }
+        
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+    <div class="keep-alive-container">
+        <h1>🔄 Keep Alive</h1>
+        <div class="status">
+            ✅ Keep Alive is Active
+        </div>
+        <div class="refresh-info">
+            This page will automatically refresh every 3-5 minutes to keep the server alive.
+            <br>Your bots will continue running uninterrupted.
+        </div>
+        <div class="countdown pulse" id="countdown">
+            Next refresh in: <span id="timer">--</span>
+        </div>
+        <a href="/" class="back-btn">🏠 Back to Main Page</a>
+    </div>
+
+    <script>
+        let refreshTime;
+        let countdownInterval;
+        let startTime;
+        
+        function setRandomRefreshTime() {
+            // Random time between 3-5 minutes (180-300 seconds)
+            const minTime = 3 * 60 * 1000; // 3 minutes in ms
+            const maxTime = 5 * 60 * 1000; // 5 minutes in ms
+            refreshTime = Math.floor(Math.random() * (maxTime - minTime + 1)) + minTime;
+            startTime = Date.now();
+            
+            console.log(\`Next refresh scheduled in \${(refreshTime / 1000 / 60).toFixed(1)} minutes\`);
+            
+            // Set timeout for refresh
+            setTimeout(() => {
+                console.log('Refreshing page to keep server alive...');
+                window.location.reload();
+            }, refreshTime);
+            
+            // Update countdown every second
+            updateCountdown();
+        }
+        
+        function updateCountdown() {
+            if (countdownInterval) {
+                clearInterval(countdownInterval);
+            }
+            
+            countdownInterval = setInterval(() => {
+                const elapsed = Date.now() - startTime;
+                const remaining = Math.max(0, refreshTime - elapsed);
+                
+                if (remaining <= 0) {
+                    document.getElementById('timer').textContent = 'Refreshing...';
+                    clearInterval(countdownInterval);
+                    return;
+                }
+                
+                const minutes = Math.floor(remaining / 60000);
+                const seconds = Math.floor((remaining % 60000) / 1000);
+                
+                document.getElementById('timer').textContent = 
+                    \`\${minutes}:\${seconds.toString().padStart(2, '0')}\`;
+            }, 1000);
+        }
+        
+        // Start the keep-alive cycle when page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            setRandomRefreshTime();
+        });
+        
+        // Log to console for debugging
+        console.log('Keep Alive page loaded - automatic refresh cycle started');
+    </script>
 </body>
 </html>
   `);
